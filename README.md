@@ -1,3 +1,3 @@
-# Trading Engine API — Starter
+# Trading Engine API — Starter (Fixed Layout)
 
-See README in the zip for details.
+This is the corrected starter with proper `/app` directory layout.
