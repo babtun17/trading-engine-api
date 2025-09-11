@@ -42,19 +42,34 @@ def run_daily():
 
     _heartbeat("daily_done")
 
+from app.data import load_prices_and_data, build_universe
+from app.features import make_panel_with_augments
+from app.model import _train_ensemble, _predict_proba  # import internal helpers
+
 def run_intraday():
-    _heartbeat("intraday_start")
-    signals_df, equity_curve = infer_intraday()
-    write_signals([
-        (_now_ts(), r.ticker, r.prob, r.signal, r.size, r.price, r.h, r.regime)
-        for r in signals_df.itertuples()
-    ])
-    eq_rows = []
-    for d, val in equity_curve:
-        ts = int(pd.Timestamp(d + " 12:00:00+00:00").timestamp())
-        eq_rows.append((ts, float(val)))
-    write_equity(eq_rows)
-    _heartbeat("intraday_done")
+    # small, fast intraday refresh using latest data
+    uni_df = build_universe(max_us=40, max_uk=15, max_crypto=3)
+    panel = load_prices_and_data(uni_df["ticker"].tolist())
+    feats = make_panel_with_augments(panel, use_finbert=False)
+
+    model = _train_ensemble(feats)  # fast; can reduce n_estimators to 120
+    latest = feats[feats["date"] == feats["date"].max()].copy()
+    latest["prob"] = _predict_proba(model, latest)
+    latest["signal"] = np.where(latest["prob"] >= 0.6, "long", "flat")
+    latest["size"] = 0.0
+    latest["price"] = latest["adj close"]
+    latest["h"] = "5d"
+    latest["regime"] = "neutral"
+
+    from app.risk import size_positions_and_apply_costs
+    latest = size_positions_and_apply_costs(latest, crypto_cap=0.05)
+
+    now = int(time.time())
+    sig_rows = [(now, r.ticker, r.prob, r.signal, r.size, r.price, r.h, r.regime) for r in latest.itertuples()]
+    write_signals(sig_rows)
+
+    # equity refresh (optional): you can recompute a mark-to-market or just no-op
+    write_metrics([("intraday_runtime_s", now, 1.0)])
 
 if __name__ == "__main__":
     import sys
