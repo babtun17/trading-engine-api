@@ -37,7 +37,7 @@ except Exception:
 
 # ---------- Helpers
 
-def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=8, pause=0.6) -> pd.DataFrame:
+def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=6, pause=0.6) -> pd.DataFrame:
     """
     Download in small chunks to avoid Yahoo throttling. Retries on empty batches.
     Returns tidy stacked OHLCV for all tickers that succeeded.
