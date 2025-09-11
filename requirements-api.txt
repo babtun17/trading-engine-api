@@ -6,3 +6,4 @@ numpy==1.26.4
 python-dotenv==1.0.1
 yfinance==0.2.43
 Cython>=3.0.0
+supabase==2.6.0
