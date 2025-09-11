@@ -108,10 +108,12 @@ def write_signals(rows: Iterable[Tuple[int,str,float,str,float,float,str,str]]) 
 
 def write_equity(rows: Iterable[Tuple[int,float]]) -> None:
     """rows: (ts_midday_utc, eq) -> stored as date d"""
-    payload = []
+    by_date = {}
     for ts, eq in rows:
         d = time.strftime("%Y-%m-%d", time.gmtime(ts))
-        payload.append({"d": d, "eq": float(eq)})
+        by_date[d] = float(eq)  # last one wins
+
+    payload = [{"d": d, "eq": eq} for d, eq in by_date.items()]
     if not payload: return
     try:
         if _mode == "client":
