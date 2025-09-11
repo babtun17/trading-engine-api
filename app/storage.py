@@ -144,3 +144,9 @@ def fetch_universe(): return []
 def fetch_latest_signals(limit=100): return []
 def fetch_equity(window=250): return []
 def fetch_metrics(): return []
+
+# at end of app/storage.py
+_required = ["upsert_universe","write_signals","write_equity","write_metrics"]
+for _name in _required:
+    if _name not in globals() or not callable(globals()[_name]):
+        raise ImportError(f"storage missing export: {_name}")
