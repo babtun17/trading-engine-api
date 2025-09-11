@@ -58,7 +58,7 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=6, pause=0.
                 break
             except Exception:
                 data = None
-                time.sleep(1.5 * (tries + 1))
+                time.sleep(3 * (tries + 1))
             finally:
                 tries += 1
         if data is None or data.empty:
