@@ -7,3 +7,4 @@ pandas==2.2.2
 yfinance==0.2.43
 nltk==3.9.1
 python-dotenv==1.0.1
+Cython>=3.0.0
