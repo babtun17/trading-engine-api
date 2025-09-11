@@ -40,16 +40,28 @@ def write_signals(rows: Iterable[Tuple[int,str,float,str,float,float,str,str]]) 
     if payload:
         _sb.table("signals").insert(payload).execute()
 
-def write_equity(rows: Iterable[Tuple[int,float]]) -> None:
-    """
-    rows: (ts_midday_utc, eq) — we store by date
-    """
-    payload = []
+
+def write_equity(rows: Iterable[Tuple[int, float]]) -> None:
+    # rows: (ts, eq) where ts converts to date primary key d
+    # Ensure one row per date to avoid ON CONFLICT twice in same statement
+    by_date = {}
     for ts, eq in rows:
         d = time.strftime("%Y-%m-%d", time.gmtime(ts))
-        payload.append({"d": d, "eq": float(eq)})
-    if payload:
-        _sb.table("equity").upsert(payload).execute()
+        by_date[d] = float(eq)  # last wins
+
+    payload = [{"d": d, "eq": v} for d, v in by_date.items()]
+    if not payload:
+        return
+    try:
+        if _mode == "client":
+            _sb.table("equity").upsert(payload).execute()
+            _log("sb_upsert_equity_ok", count=len(payload))
+        elif _mode == "rest":
+            _rest_upsert("equity", payload)
+        else:
+            _log("sb_no_client")
+    except Exception as e:
+        _log("sb_upsert_equity_fail", error=str(e))
 
 def write_metrics(rows: Iterable[Tuple[str,int,float]]) -> None:
     """
