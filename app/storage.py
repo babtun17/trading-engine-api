@@ -2,6 +2,11 @@
 import os, time
 from typing import Iterable, Dict, List, Tuple, Any
 
+# ---- Globals for mode and logging ----
+_mode = None   # <- initialize _mode globally
+def _log(ev: str, **kw):
+    print(json.dumps({"ev": ev, **kw}), file=sys.stdout, flush=True)
+    
 # Option 1: Supabase Python client (recommended)
 from supabase import create_client, Client
 
@@ -42,12 +47,12 @@ def write_signals(rows: Iterable[Tuple[int,str,float,str,float,float,str,str]]) 
 
 
 def write_equity(rows: Iterable[Tuple[int, float]]) -> None:
-    # rows: (ts, eq) where ts converts to date primary key d
-    # Ensure one row per date to avoid ON CONFLICT twice in same statement
+    # rows: (ts, eq) -> stored as date primary key d
+    # Ensure one row per date to avoid ON CONFLICT multiple times
     by_date = {}
     for ts, eq in rows:
         d = time.strftime("%Y-%m-%d", time.gmtime(ts))
-        by_date[d] = float(eq)  # last wins
+        by_date[d] = float(eq)  # last value for that date wins
 
     payload = [{"d": d, "eq": v} for d, v in by_date.items()]
     if not payload:
