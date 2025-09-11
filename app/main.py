@@ -2,7 +2,8 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.logging_utils import log
-from app.pipeline import run_intraday
+from app.storage import write_metrics
+import time
 
 app = FastAPI(title="Trading Engine API", version="1.0")
 
@@ -25,7 +26,9 @@ def health():
 
 @app.post("/admin/refresh")
 def admin_refresh(x_api_key: str | None = Header(None)):
+    # No imports of pipeline/model here to keep web image slim.
     auth(x_api_key)
+    # Write a “refresh requested” marker to Supabase that you can see in logs.
+    write_metrics([("admin_refresh_requested", int(time.time()), 1.0)])
     log("admin_refresh_called")
-    run_intraday()
-    return {"ok": True}
+    return {"ok": True, "note": "Cron runs handle training; web stays slim."}
