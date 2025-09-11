@@ -1,32 +1,93 @@
-import time
+import os, time
 from typing import List, Dict
 import pandas as pd
 import yfinance as yf
 
+# ---------- Networking hardening for yfinance
+import requests
+from requests.adapters import HTTPAdapter, Retry
+
+def _make_session(pool_maxsize: int = 50, retries: int = 3, backoff: float = 0.5) -> requests.Session:
+    sess = requests.Session()
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=pool_maxsize, pool_maxsize=pool_maxsize)
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    return sess
+
+# Use a larger pooled session across yfinance
+_yf_session = _make_session(pool_maxsize=40, retries=4, backoff=0.8)
+yf.shared._requests = _yf_session  # yfinance uses this session under the hood
+
+# Avoid tz cache noise in Render
+try:
+    cache_dir = "/opt/render/project/.cache/py-yfinance"
+    os.makedirs(cache_dir, exist_ok=True)
+    from yfinance.utils import set_tz_cache_location
+    set_tz_cache_location(cache_dir)
+except Exception:
+    pass
+
+
 # ---------- Helpers
 
-def _dl_prices(tickers: List[str], period="2y", interval="1d") -> pd.DataFrame:
+def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=8, pause=0.6) -> pd.DataFrame:
     """
-    Returns OHLCV panel with columns: ('Open','High','Low','Close','Adj Close','Volume')
-    Multi-index columns from yfinance -> we stack to tidy.
+    Download in small chunks to avoid Yahoo throttling. Retries on empty batches.
+    Returns tidy stacked OHLCV for all tickers that succeeded.
     """
-    data = yf.download(tickers, period=period, interval=interval, auto_adjust=False, progress=False, group_by='ticker')
-    if isinstance(data.columns, pd.MultiIndex):
-        frames = []
-        for t in tickers:
-            if t not in data.columns.levels[0]:
-                continue
-            df = data[t].copy()
-            df["Ticker"] = t
-            frames.append(df)
-        out = pd.concat(frames)
-    else:
-        # single ticker
-        out = data.copy()
-        out["Ticker"] = tickers[0]
-    out = out.reset_index().rename(columns={"Date":"Date"})
-    out = out.dropna(subset=["Close"])
-    return out  # long format by stacking later
+    frames = []
+    T = [t for t in tickers if isinstance(t, str) and t.strip()]
+    for i in range(0, len(T), chunk):
+        batch = T[i:i+chunk]
+        tries = 0
+        while tries < 3:
+            try:
+                data = yf.download(
+                    batch, period=period, interval=interval,
+                    auto_adjust=False, progress=False, group_by='ticker',
+                    threads=True,  # yfinance will parallelize within reason
+                    session=_yf_session
+                )
+                break
+            except Exception:
+                data = None
+                time.sleep(1.5 * (tries + 1))
+            finally:
+                tries += 1
+        if data is None or data.empty:
+            # skip this batch but continue; log minimal info (yfinance already logs warnings)
+            time.sleep(pause)
+            continue
+
+        if isinstance(data.columns, pd.MultiIndex):
+            for t in batch:
+                if t in data.columns.levels[0]:
+                    df = data[t].copy()
+                    if df.empty or "Close" not in df.columns:
+                        continue
+                    df["Ticker"] = t
+                    frames.append(df.reset_index().rename(columns={"Date": "Date"}))
+        else:
+            # single ticker case
+            if "Close" in data.columns:
+                df = data.copy()
+                df["Ticker"] = batch[0]
+                frames.append(df.reset_index().rename(columns={"Date": "Date"}))
+
+        time.sleep(pause)
+
+    if not frames:
+        return pd.DataFrame(columns=["Date","Open","High","Low","Close","Adj Close","Volume","Ticker"])
+    out = pd.concat(frames, ignore_index=True)
+    out = out.dropna(subset=["Close"]).sort_values(["Ticker","Date"]).reset_index(drop=True)
+    return out
 
 def _macro_frame() -> pd.DataFrame:
     """
@@ -48,14 +109,13 @@ def _macro_frame() -> pd.DataFrame:
     return macro
 
 def _light_fundamentals(tickers: List[str]) -> pd.DataFrame:
-    """
-    Lightweight funda using yfinance .info (may be sparse). We guard with try/except.
-    Metrics: trailingPE, profitMargins, returnOnEquity, revenueGrowth, earningsGrowth.
-    """
     rows: List[Dict] = []
     for t in tickers:
+        info = {}
         try:
-            info = yf.Ticker(t).get_info()  # yfinance 0.2.43
+            tk = yf.Ticker(t, session=_yf_session)
+            # yfinance .get_info can throw / return None when rate-limited
+            info = tk.get_info() or {}
         except Exception:
             info = {}
         rows.append({
@@ -66,13 +126,10 @@ def _light_fundamentals(tickers: List[str]) -> pd.DataFrame:
             "rev_growth": info.get("revenueGrowth"),
             "eps_growth": info.get("earningsGrowth"),
         })
+        time.sleep(0.05)  # tiny pacing to be gentle
     return pd.DataFrame(rows)
 
 def _vader_sentiment(tickers: List[str]) -> pd.DataFrame:
-    """
-    Pulls recent headlines from yfinance .news (limited but free)
-    and scores them with NLTK VADER; aggregates per ticker over last ~14 days.
-    """
     try:
         from nltk.sentiment import SentimentIntensityAnalyzer
         import nltk
@@ -82,29 +139,29 @@ def _vader_sentiment(tickers: List[str]) -> pd.DataFrame:
             nltk.download('vader_lexicon')
         sia = SentimentIntensityAnalyzer()
     except Exception:
-        # if nltk missing for some reason, return zeros
         return pd.DataFrame({"Ticker": tickers, "sentiment_vader": [0.0]*len(tickers)})
 
     scores = []
     cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=14)
     for t in tickers:
-        try:
-            news = yf.Ticker(t).news or []
-        except Exception:
-            news = []
         vals = []
-        for n in news:
-            title = (n.get("title") or "")[:280]
-            pub = n.get("providerPublishTime")
-            if pub:
-                ts = pd.to_datetime(pub, unit="s", utc=True)
-                if ts < cutoff:
-                    continue
-            if title:
-                s = sia.polarity_scores(title)["compound"]
-                vals.append(s)
+        try:
+            news = (yf.Ticker(t, session=_yf_session).news) or []
+            for n in news:
+                title = (n.get("title") or "")[:280]
+                pub = n.get("providerPublishTime")
+                if pub:
+                    ts = pd.to_datetime(pub, unit="s", utc=True)
+                    if ts < cutoff:
+                        continue
+                if title:
+                    s = sia.polarity_scores(title)["compound"]
+                    vals.append(s)
+        except Exception:
+            pass
         mean = float(pd.Series(vals).mean()) if vals else 0.0
         scores.append({"Ticker": t, "sentiment_vader": mean})
+        time.sleep(0.02)
     return pd.DataFrame(scores)
 
 # ---------- Public API
