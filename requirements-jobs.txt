@@ -1,0 +1,9 @@
+# Pinned to versions with manylinux wheels for Python 3.11
+numpy==1.26.4
+scipy==1.11.4
+scikit-learn==1.4.2
+xgboost==2.0.3
+pandas==2.2.2
+yfinance==0.2.43
+nltk==3.9.1
+python-dotenv==1.0.1
