@@ -3,5 +3,36 @@ services:
     name: trading-api
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-api.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: API_KEY
+        sync: false
+      - key: DB_PATH
+        value: "db.sqlite"
+      - key: CORS_ORIGINS
+        value: "*"
+
+  - type: cron
+    name: trading-daily
+    env: python
+    buildCommand: pip install -r requirements-jobs.txt
+    startCommand: python -m app.pipeline daily
+    schedule: "30 6 * * *"
+    envVars:
+      - key: API_KEY
+        sync: false
+      - key: DB_PATH
+        value: "db.sqlite"
+
+  - type: cron
+    name: trading-intraday
+    env: python
+    buildCommand: pip install -r requirements-jobs.txt
+    startCommand: python -m app.pipeline intraday
+    schedule: "*/15 8-21 * * *"
+    envVars:
+      - key: API_KEY
+        sync: false
+      - key: DB_PATH
+        value: "db.sqlite"
