@@ -1,58 +1,61 @@
-# app/storage.py — Supabase writer (backend)
-import os, time
-from typing import Iterable, Dict, List, Tuple, Any
+# ---- header & init ----
+import os, time, sys, json
+from typing import Iterable, Tuple
 
-# ---- Globals for mode and logging ----
-_mode = None   # <- initialize _mode globally
+_mode = None
 def _log(ev: str, **kw):
     print(json.dumps({"ev": ev, **kw}), file=sys.stdout, flush=True)
-    
-# Option 1: Supabase Python client (recommended)
-from supabase import create_client, Client
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-_sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
-def upsert_universe(rows: Iterable[Tuple[str,str,int,float,int]]) -> None:
-    """
-    rows: (ticker, country, is_crypto, adv, last_update_ts)
-    """
-    payload = []
-    for t,c,is_c,adv,ts in rows:
-        payload.append({
-            "ticker": t,
-            "country": c,
-            "is_crypto": bool(is_c),
-            "adv": float(adv),
-            "last_update": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-        })
-    if payload:
-        _sb.table("universe").upsert(payload).execute()
+_sb = None
+try:
+    from supabase import create_client
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        _sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        _mode = "client"
+        _log("sb_init_ok", mode=_mode)
+    else:
+        _log("sb_env_missing", url=bool(SUPABASE_URL), key=bool(SUPABASE_SERVICE_KEY))
+except Exception as e:
+    _log("sb_client_import_fail", error=str(e))
 
-def write_signals(rows: Iterable[Tuple[int,str,float,str,float,float,str,str]]) -> None:
-    """
-    rows: (ts, ticker, prob, signal, size, price, horizon, regime)
-    """
-    payload = []
-    for ts,t,prob,sig,size,price,h,reg in rows:
-        payload.append({
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
-            "ticker": t, "prob": float(prob), "signal": sig,
-            "size": float(size), "price": float(price),
-            "horizon": h, "regime": reg
-        })
-    if payload:
-        _sb.table("signals").insert(payload).execute()
+import requests
+HEADERS = REST = None
+if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+    HEADERS = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    REST = f"{SUPABASE_URL}/rest/v1"
+    if _mode is None:
+        _mode = "rest"
+        _log("sb_init_ok", mode=_mode)
 
+def _rest_upsert(table: str, rows):
+    r = requests.post(f"{REST}/{table}", headers={**HEADERS, "Prefer":"resolution=merge-duplicates"}, json=rows)
+    if not r.ok:
+        _log("sb_rest_error", table=table, status=r.status_code, text=r.text[:300])
+    else:
+        _log("sb_rest_ok", table=table, status=r.status_code)
+    r.raise_for_status()
 
+def _rest_insert(table: str, rows):
+    r = requests.post(f"{REST}/{table}", headers=HEADERS, json=rows)
+    if not r.ok:
+        _log("sb_rest_error", table=table, status=r.status_code, text=r.text[:300])
+    else:
+        _log("sb_rest_ok", table=table, status=r.status_code)
+    r.raise_for_status()
+
+# ---- equity writer (de-dupes dates) ----
 def write_equity(rows: Iterable[Tuple[int, float]]) -> None:
-    # rows: (ts, eq) -> stored as date primary key d
-    # Ensure one row per date to avoid ON CONFLICT multiple times
     by_date = {}
     for ts, eq in rows:
         d = time.strftime("%Y-%m-%d", time.gmtime(ts))
-        by_date[d] = float(eq)  # last value for that date wins
+        by_date[d] = float(eq)  # last wins
 
     payload = [{"d": d, "eq": v} for d, v in by_date.items()]
     if not payload:
@@ -67,23 +70,3 @@ def write_equity(rows: Iterable[Tuple[int, float]]) -> None:
             _log("sb_no_client")
     except Exception as e:
         _log("sb_upsert_equity_fail", error=str(e))
-
-def write_metrics(rows: Iterable[Tuple[str,int,float]]) -> None:
-    """
-    rows: (name, ts, value)
-    """
-    payload = []
-    for name, ts, val in rows:
-        payload.append({
-            "name": name,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
-            "value": float(val)
-        })
-    if payload:
-        _sb.table("metrics").insert(payload).execute()
-
-# Frontend reads Supabase directly, so these are not used by the API anymore.
-def fetch_universe(): return []
-def fetch_latest_signals(limit=100): return []
-def fetch_equity(window=250): return []
-def fetch_metrics(): return []
