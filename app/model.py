@@ -15,7 +15,7 @@ def train_ensemble_daily(panel: pd.DataFrame):
         price= 100.0
         rows.append({"ts": now, "ticker": t, "prob": prob, "signal": sig, "size": size, "price": price, "h": "5d", "regime":"neutral"})
     d = datetime.now(timezone.utc).date().isoformat()
-    equity = [(d, 1.0), (d, 1.01)]
+    equity = [(d, 1.01)]  # <-- single row for that date
     return pd.DataFrame(rows), equity
 
 def infer_intraday():
