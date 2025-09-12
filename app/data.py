@@ -11,6 +11,7 @@ class DataUnavailableError(Exception):
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from pandas_datareader import data as pdr
+import io
 
 def _is_crypto(t: str) -> bool:
     return isinstance(t, str) and ("-USD" in t)
@@ -21,27 +22,52 @@ def _dl_prices_stooq(tickers: List[str], period_days: int = 730) -> List[pd.Data
     """
     frames: List[pd.DataFrame] = []
     cutoff = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=period_days)
+
+    def stooq_symbol(t: str) -> str | None:
+        if _is_crypto(t):
+            return None
+        if t.endswith('.L'):
+            base = t.split('.')[0].lower()
+            return f"{base}.uk"
+        return f"{t.lower()}.us"
+
     for t in tickers:
+        sym = stooq_symbol(t)
+        if not sym:
+            continue
+        url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
         try:
-            df = pdr.DataReader(t, "stooq")
+            r = _yf_session.get(url, timeout=15)
+            if r.status_code != 200 or not r.text or r.text.strip().lower().startswith('<'):
+                # fallback to pandas-datareader which may have its own mapping
+                try:
+                    df = pdr.DataReader(t, 'stooq')
+                except Exception:
+                    df = None
+                if df is None or df.empty:
+                    continue
+                df = df.sort_index().reset_index().rename(columns={"Date":"Date"})
+            else:
+                df = pd.read_csv(io.StringIO(r.text))
             if df is None or df.empty:
                 continue
-            # Stooq returns latest first; sort by date ascending
-            df = df.sort_index().reset_index().rename(columns={"Date": "Date"})
-            # Keep only since cutoff
-            if "Date" in df.columns:
-                df = df[df["Date"] >= cutoff]
-            # Normalize columns; create Adj Close = Close
+            # Normalize columns
             rename_map = {"Open":"Open","High":"High","Low":"Low","Close":"Close","Volume":"Volume",
                           "open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"}
             df = df.rename(columns=rename_map)
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df[df['Date'] >= cutoff]
             if "Adj Close" not in df.columns and "Close" in df.columns:
                 df["Adj Close"] = df["Close"]
             df["Ticker"] = t
-            frames.append(df[[c for c in ["Date","Open","High","Low","Close","Adj Close","Volume","Ticker"] if c in df.columns]])
+            keep_cols = [c for c in ["Date","Open","High","Low","Close","Adj Close","Volume","Ticker"] if c in df.columns]
+            if keep_cols:
+                frames.append(df[keep_cols])
         except Exception:
-            # swallow and let yfinance fallback handle if needed
-            pass
+            continue
+        finally:
+            time.sleep(0.2)
     return frames
 
 def _make_session(pool_maxsize: int = 50, retries: int = 3, backoff: float = 0.5) -> requests.Session:
