@@ -1,4 +1,5 @@
 import time, pandas as pd
+import numpy as np
 from datetime import datetime, timezone
 from app.storage import upsert_universe, write_signals, write_equity, write_metrics
 from app.data import build_universe, load_prices_and_data
@@ -47,29 +48,63 @@ from app.features import make_panel_with_augments
 from app.model import _train_ensemble, _predict_proba  # import internal helpers
 
 def run_intraday():
-    # small, fast intraday refresh using latest data
-    uni_df = build_universe(max_us=40, max_uk=15, max_crypto=3)
-    panel = load_prices_and_data(uni_df["ticker"].tolist())
-    feats = make_panel_with_augments(panel, use_finbert=False)
+    try:
+        _heartbeat("intraday_start")
+        # small, fast intraday refresh using latest data
+        uni_df = build_universe(max_us=40, max_uk=15, max_crypto=3)
+        
+        # Try to load data with fallback
+        try:
+            panel = load_prices_and_data(uni_df["ticker"].tolist())
+        except Exception as e:
+            print(f"Failed to load prices and data: {e}")
+            # Fallback: try with a smaller subset
+            print("Trying with smaller subset...")
+            uni_df = build_universe(max_us=20, max_uk=10, max_crypto=2)
+            panel = load_prices_and_data(uni_df["ticker"].tolist())
+        
+        if panel.empty:
+            print("No data available for intraday processing")
+            write_metrics([("intraday_error", _now_ts(), 1.0)])
+            return
+            
+        feats = make_panel_with_augments(panel, use_finbert=False)
 
-    model = _train_ensemble(feats)  # fast; can reduce n_estimators to 120
-    latest = feats[feats["date"] == feats["date"].max()].copy()
-    latest["prob"] = _predict_proba(model, latest)
-    latest["signal"] = np.where(latest["prob"] >= 0.6, "long", "flat")
-    latest["size"] = 0.0
-    latest["price"] = latest["adj close"]
-    latest["h"] = "5d"
-    latest["regime"] = "neutral"
+        if feats.empty:
+            print("No features available for intraday processing")
+            write_metrics([("intraday_error", _now_ts(), 1.0)])
+            return
 
-    from app.risk import size_positions_and_apply_costs
-    latest = size_positions_and_apply_costs(latest, crypto_cap=0.05)
+        model = _train_ensemble(feats)  # fast; can reduce n_estimators to 120
+        latest = feats[feats["date"] == feats["date"].max()].copy()
+        
+        if latest.empty:
+            print("No latest data available for intraday processing")
+            write_metrics([("intraday_error", _now_ts(), 1.0)])
+            return
+            
+        latest["prob"] = _predict_proba(model, latest)
+        latest["signal"] = np.where(latest["prob"] >= 0.6, "long", "flat")
+        latest["size"] = 0.0
+        latest["price"] = latest["adj close"]
+        latest["h"] = "5d"
+        latest["regime"] = "neutral"
 
-    now = int(time.time())
-    sig_rows = [(now, r.ticker, r.prob, r.signal, r.size, r.price, r.h, r.regime) for r in latest.itertuples()]
-    write_signals(sig_rows)
+        from app.risk import size_positions_and_apply_costs
+        latest = size_positions_and_apply_costs(latest, crypto_cap=0.05)
 
-    # equity refresh (optional): you can recompute a mark-to-market or just no-op
-    write_metrics([("intraday_runtime_s", now, 1.0)])
+        now = int(time.time())
+        sig_rows = [(now, r.ticker, r.prob, r.signal, r.size, r.price, r.h, r.regime) for r in latest.itertuples()]
+        write_signals(sig_rows)
+
+        # equity refresh (optional): you can recompute a mark-to-market or just no-op
+        write_metrics([("intraday_runtime_s", now, 1.0)])
+        _heartbeat("intraday_done")
+        
+    except Exception as e:
+        print(f"Intraday pipeline failed: {e}")
+        write_metrics([("intraday_error", _now_ts(), 1.0)])
+        raise
 
 if __name__ == "__main__":
     import sys
