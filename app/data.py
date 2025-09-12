@@ -10,9 +10,50 @@ class DataUnavailableError(Exception):
 # ---------- Networking hardening for yfinance
 import requests
 from requests.adapters import HTTPAdapter, Retry
+from pandas_datareader import data as pdr
+
+def _is_crypto(t: str) -> bool:
+    return isinstance(t, str) and ("-USD" in t)
+
+def _dl_prices_stooq(tickers: List[str], period_days: int = 730) -> List[pd.DataFrame]:
+    """
+    Fetch EOD OHLCV from Stooq for non-crypto tickers. Returns list of tidy DataFrames.
+    """
+    frames: List[pd.DataFrame] = []
+    cutoff = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=period_days)
+    for t in tickers:
+        try:
+            df = pdr.DataReader(t, "stooq")
+            if df is None or df.empty:
+                continue
+            # Stooq returns latest first; sort by date ascending
+            df = df.sort_index().reset_index().rename(columns={"Date": "Date"})
+            # Keep only since cutoff
+            if "Date" in df.columns:
+                df = df[df["Date"] >= cutoff]
+            # Normalize columns; create Adj Close = Close
+            rename_map = {"Open":"Open","High":"High","Low":"Low","Close":"Close","Volume":"Volume",
+                          "open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"}
+            df = df.rename(columns=rename_map)
+            if "Adj Close" not in df.columns and "Close" in df.columns:
+                df["Adj Close"] = df["Close"]
+            df["Ticker"] = t
+            frames.append(df[[c for c in ["Date","Open","High","Low","Close","Adj Close","Volume","Ticker"] if c in df.columns]])
+        except Exception:
+            # swallow and let yfinance fallback handle if needed
+            pass
+    return frames
 
 def _make_session(pool_maxsize: int = 50, retries: int = 3, backoff: float = 0.5) -> requests.Session:
     sess = requests.Session()
+    # Set a browser-like User-Agent to reduce chance of upstream blocking
+    sess.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        )
+    })
     retry = Retry(
         total=retries,
         backoff_factor=backoff,
@@ -48,11 +89,19 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=1, pause=6.
     """
     frames = []
     T = [t for t in tickers if isinstance(t, str) and t.strip()]
+
+    # 0) Try Stooq first for non-crypto tickers (EOD)
+    eq_tickers = [t for t in T if not _is_crypto(t)]
+    stooq_frames = _dl_prices_stooq(eq_tickers)
+    frames.extend(stooq_frames)
+    got_eq = set([df["Ticker"].iloc[0] for df in stooq_frames if not df.empty])
+    # Remaining tickers to attempt via yfinance
+    remaining = [t for t in T if (t not in got_eq)]
     
     # Try individual ticker downloads as fallback
-    if len(T) > 1:
-        for i in range(0, len(T), chunk):
-            batch = T[i:i+chunk]
+    if len(remaining) > 1:
+        for i in range(0, len(remaining), chunk):
+            batch = remaining[i:i+chunk]
             data = None
             for tries in range(3):
                 try:
@@ -103,20 +152,41 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=1, pause=6.
     # If batch download failed, try individual tickers
     if not frames:
         print("Batch download failed, trying individual tickers...")
-        for t in T:
+        for t in remaining:
             try:
-                data = yf.download(
-                    t, period=period, interval=interval,
-                    auto_adjust=False, progress=False,
-                    session=_yf_session
-                )
-                if data is not None and not data.empty and "Close" in data.columns:
-                    df = data.copy()
-                    df["Ticker"] = t
-                    df = df.reset_index()
+                # For any remaining symbol, if not crypto try Stooq again, else yfinance
+                df = None
+                if not _is_crypto(t):
+                    try:
+                        df = pdr.DataReader(t, "stooq")
+                        if df is not None and not df.empty:
+                            df = df.sort_index().reset_index()
+                    except Exception:
+                        df = None
+                if df is None or df.empty:
+                    data = yf.download(
+                        t, period=period, interval=interval,
+                        auto_adjust=False, progress=False,
+                        session=_yf_session
+                    )
+                    if data is not None and not data.empty and "Close" in data.columns:
+                        df = data.copy().reset_index()
+                    else:
+                        df = None
+                if df is not None and not df.empty:
+                    # Normalize to our schema
+                    # Stooq returns columns upper-case already, with index as Date
+                    if "Date" not in df.columns:
+                        df = df.reset_index()
+                    rename_map = {"Open":"Open","High":"High","Low":"Low","Close":"Close","Volume":"Volume",
+                                   "open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"}
+                    df = df.rename(columns=rename_map)
+                    if "Adj Close" not in df.columns and "Close" in df.columns:
+                        df["Adj Close"] = df["Close"]
                     if 'Date' in df.columns:
                         df['Date'] = pd.to_datetime(df['Date'])
-                    frames.append(df)
+                    df["Ticker"] = t
+                    frames.append(df[[c for c in ["Date","Open","High","Low","Close","Adj Close","Volume","Ticker"] if c in df.columns]])
                     print(f"Successfully downloaded {t}")
                 else:
                     print(f"Failed to download {t}")

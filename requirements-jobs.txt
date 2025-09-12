@@ -10,3 +10,4 @@ python-dotenv==1.0.1
 Cython>=3.0.0
 supabase==2.6.0
 alpaca-trade-api==3.2.0
+pandas-datareader==0.10.0
