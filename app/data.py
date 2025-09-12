@@ -1,4 +1,5 @@
 import os, time, random
+import logging
 from typing import List, Dict
 import pandas as pd
 import yfinance as yf
@@ -96,6 +97,10 @@ def _make_session(pool_maxsize: int = 50, retries: int = 3, backoff: float = 0.5
 _yf_session = _make_session(pool_maxsize=40, retries=4, backoff=0.8)
 yf.shared._requests = _yf_session  # yfinance uses this session under the hood
 
+# Tame noisy loggers from yfinance/urllib3
+logging.getLogger("yfinance").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 # Avoid tz cache noise in Render
 try:
     cache_dir = "/opt/render/project/.cache/py-yfinance"
@@ -107,6 +112,11 @@ except Exception:
 
 
 # ---------- Helpers
+
+# Feature flags via env (use strings '1' to enable)
+DISABLE_FUNDA = os.getenv("DISABLE_FUNDA", "0") == "1"
+DISABLE_NEWS = os.getenv("DISABLE_NEWS", "0") == "1"
+DISABLE_MACRO = os.getenv("DISABLE_MACRO", "0") == "1"
 
 def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=1, pause=6.0) -> pd.DataFrame:
     """
@@ -121,13 +131,17 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=1, pause=6.
     stooq_frames = _dl_prices_stooq(eq_tickers)
     frames.extend(stooq_frames)
     got_eq = set([df["Ticker"].iloc[0] for df in stooq_frames if not df.empty])
-    # Remaining tickers to attempt via yfinance
+    # Remaining tickers
     remaining = [t for t in T if (t not in got_eq)]
+    # Split into crypto vs equities that still missing
+    remaining_crypto = [t for t in remaining if _is_crypto(t)]
+    remaining_eq = [t for t in remaining if not _is_crypto(t)]
     
     # Try individual ticker downloads as fallback
-    if len(remaining) > 1:
-        for i in range(0, len(remaining), chunk):
-            batch = remaining[i:i+chunk]
+    # 1) Only use yfinance batch for crypto symbols (equities handled by Stooq only)
+    if len(remaining_crypto) > 1:
+        for i in range(0, len(remaining_crypto), chunk):
+            batch = remaining_crypto[i:i+chunk]
             data = None
             for tries in range(3):
                 try:
@@ -178,27 +192,18 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=1, pause=6.
     # If batch download failed, try individual tickers
     if not frames:
         print("Batch download failed, trying individual tickers...")
-        for t in remaining:
+        # Try crypto via yfinance one-by-one; skip equities to avoid Yahoo for them
+        for t in remaining_crypto:
             try:
-                # For any remaining symbol, if not crypto try Stooq again, else yfinance
-                df = None
-                if not _is_crypto(t):
-                    try:
-                        df = pdr.DataReader(t, "stooq")
-                        if df is not None and not df.empty:
-                            df = df.sort_index().reset_index()
-                    except Exception:
-                        df = None
-                if df is None or df.empty:
-                    data = yf.download(
-                        t, period=period, interval=interval,
-                        auto_adjust=False, progress=False,
-                        session=_yf_session
-                    )
-                    if data is not None and not data.empty and "Close" in data.columns:
-                        df = data.copy().reset_index()
-                    else:
-                        df = None
+                data = yf.download(
+                    t, period=period, interval=interval,
+                    auto_adjust=False, progress=False,
+                    session=_yf_session
+                )
+                if data is not None and not data.empty and "Close" in data.columns:
+                    df = data.copy().reset_index()
+                else:
+                    df = None
                 if df is not None and not df.empty:
                     # Normalize to our schema
                     # Stooq returns columns upper-case already, with index as Date
@@ -267,6 +272,15 @@ def _macro_frame() -> pd.DataFrame:
     return macro
 
 def _light_fundamentals(tickers: List[str]) -> pd.DataFrame:
+    if DISABLE_FUNDA:
+        return pd.DataFrame({
+            "Ticker": tickers,
+            "pe": [None]*len(tickers),
+            "profit_margin": [None]*len(tickers),
+            "roe": [None]*len(tickers),
+            "rev_growth": [None]*len(tickers),
+            "eps_growth": [None]*len(tickers),
+        })
     rows: List[Dict] = []
     for t in tickers:
         info = {}
@@ -288,6 +302,8 @@ def _light_fundamentals(tickers: List[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def _vader_sentiment(tickers: List[str]) -> pd.DataFrame:
+    if DISABLE_NEWS:
+        return pd.DataFrame({"Ticker": tickers, "sentiment_vader": [0.0]*len(tickers)})
     try:
         from nltk.sentiment import SentimentIntensityAnalyzer
         import nltk
