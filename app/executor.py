@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 import pandas as pd
 from supabase import create_client
 from app.broker_alpaca import get_client, market_is_open, get_positions, submit_market_order
+from app.broker_alpaca import BrokerError, MarketClosedError, OrderSubmissionError, PositionRetrievalError
 
 SB_URL = os.environ["SUPABASE_URL"]
 SB_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -78,10 +79,16 @@ def build_orders_from_signals(df: pd.DataFrame, equity_usd: float) -> List[dict]
     return orders
 
 def place_orders(orders: List[dict]) -> List[dict]:
-    api = get_client()
+    """Place orders with proper error handling"""
+    try:
+        api = get_client()
+    except BrokerError as e:
+        print(f"Failed to get broker client: {e}")
+        return [{"ok": False, "error": str(e), "order": o} for o in orders]
+    
     if not market_is_open(api):
-        # OK for crypto but equity market may be closed; drop or keep crypto only.
-        pass
+        print("Market is closed - skipping order placement")
+        return [{"ok": False, "error": "Market closed", "order": o} for o in orders]
 
     placed = []
     for o in orders:
@@ -89,16 +96,27 @@ def place_orders(orders: List[dict]) -> List[dict]:
             raw = submit_market_order(api, symbol=o["ticker"], side=o["side"],
                                       qty=o["qty"], client_order_id=o["client_order_id"])
             placed.append({"ok": True, "raw": raw, "order": o})
+            print(f"Successfully placed order for {o['ticker']}")
+        except OrderSubmissionError as e:
+            print(f"Order submission failed for {o['ticker']}: {e}")
+            placed.append({"ok": False, "error": str(e), "order": o})
         except Exception as e:
+            print(f"Unexpected error placing order for {o['ticker']}: {e}")
             placed.append({"ok": False, "error": str(e), "order": o})
     return placed
 
 def sync_positions():
     """Refresh positions snapshot from broker."""
-    api = get_client()
-    pos = get_positions(api)
-    for t, p in pos.items():
-        upsert_position_row(t, p["qty"], p["avg_price"])
+    try:
+        api = get_client()
+        pos = get_positions(api)
+        for t, p in pos.items():
+            upsert_position_row(t, p["qty"], p["avg_price"])
+        print(f"Synced {len(pos)} positions")
+    except (BrokerError, PositionRetrievalError) as e:
+        print(f"Failed to sync positions: {e}")
+    except Exception as e:
+        print(f"Unexpected error syncing positions: {e}")
 
 def run_once():
     # 1) Pull latest signals

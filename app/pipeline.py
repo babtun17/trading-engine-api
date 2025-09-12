@@ -84,7 +84,8 @@ def run_intraday():
             return
             
         latest["prob"] = _predict_proba(model, latest)
-        latest["signal"] = np.where(latest["prob"] >= 0.6, "long", "flat")
+        from app.constants import SIGNAL_THRESHOLD
+        latest["signal"] = np.where(latest["prob"] >= SIGNAL_THRESHOLD, "long", "flat")
         latest["size"] = 0.0
         latest["price"] = latest["adj close"]
         latest["h"] = "5d"

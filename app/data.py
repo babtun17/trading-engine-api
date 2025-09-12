@@ -3,6 +3,10 @@ from typing import List, Dict
 import pandas as pd
 import yfinance as yf
 
+class DataUnavailableError(Exception):
+    """Raised when market data cannot be retrieved"""
+    pass
+
 # ---------- Networking hardening for yfinance
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -121,23 +125,8 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=4, pause=1.
             time.sleep(pause)
 
     if not frames:
-        print("All download attempts failed, creating minimal fallback data")
-        # Create minimal fallback data for testing
-        dates = pd.date_range(end=pd.Timestamp.now(), periods=30, freq='D')
-        fallback_data = []
-        for t in T[:5]:  # Limit to first 5 tickers for fallback
-            for date in dates:
-                fallback_data.append({
-                    'Date': date,
-                    'Open': 100.0,
-                    'High': 105.0,
-                    'Low': 95.0,
-                    'Close': 102.0,
-                    'Adj Close': 102.0,
-                    'Volume': 1000000,
-                    'Ticker': t
-                })
-        return pd.DataFrame(fallback_data)
+        print("All download attempts failed - no market data available")
+        raise DataUnavailableError("No market data available - cannot proceed safely")
     
     out = pd.concat(frames, ignore_index=True)
     out = out.dropna(subset=["Close"]).sort_values(["Ticker","Date"]).reset_index(drop=True)

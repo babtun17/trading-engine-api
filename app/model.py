@@ -74,7 +74,8 @@ def train_ensemble_daily(panel: pd.DataFrame) -> Tuple[pd.DataFrame, list]:
     live["prob"] = _predict_proba(model, live)
 
     # Signal rule: prob thresholds (adaptive later)
-    live["signal"] = np.where(live["prob"] >= 0.6, "long", "flat")
+    from app.constants import SIGNAL_THRESHOLD
+    live["signal"] = np.where(live["prob"] >= SIGNAL_THRESHOLD, "long", "flat")
     live["size"] = 0.0  # sized later in risk module
     live["price"] = live["adj close"]
     live["h"] = "5d"
