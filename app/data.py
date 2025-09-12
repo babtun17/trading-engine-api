@@ -37,7 +37,7 @@ except Exception:
 
 # ---------- Helpers
 
-def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=6, pause=0.6) -> pd.DataFrame:
+def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=4, pause=1.0) -> pd.DataFrame:
     """
     Download in small chunks to avoid Yahoo throttling. Retries on empty batches.
     Returns tidy stacked OHLCV for all tickers that succeeded.
@@ -46,23 +46,25 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=6, pause=0.
     T = [t for t in tickers if isinstance(t, str) and t.strip()]
     for i in range(0, len(T), chunk):
         batch = T[i:i+chunk]
-        tries = 0
-        while tries < 3:
+        data = None
+        for tries in range(3):
             try:
                 data = yf.download(
                     batch, period=period, interval=interval,
                     auto_adjust=False, progress=False, group_by='ticker',
-                    threads=True,  # yfinance will parallelize within reason
+                    threads=False,  # Disable threading to reduce rate limiting
                     session=_yf_session
                 )
-                break
-            except Exception:
+                if data is not None and not data.empty:
+                    break
+            except Exception as e:
+                print(f"Download attempt {tries + 1} failed for batch {batch}: {e}")
+                if tries < 2:  # Not the last attempt
+                    time.sleep(5 * (tries + 1))  # Exponential backoff
                 data = None
-                time.sleep(3 * (tries + 1))
-            finally:
-                tries += 1
+        
         if data is None or data.empty:
-            # skip this batch but continue; log minimal info (yfinance already logs warnings)
+            print(f"Skipping batch {batch} - no data retrieved")
             time.sleep(pause)
             continue
 
@@ -73,13 +75,21 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=6, pause=0.
                     if df.empty or "Close" not in df.columns:
                         continue
                     df["Ticker"] = t
-                    frames.append(df.reset_index().rename(columns={"Date": "Date"}))
+                    df = df.reset_index()
+                    # Ensure Date column is datetime
+                    if 'Date' in df.columns:
+                        df['Date'] = pd.to_datetime(df['Date'])
+                    frames.append(df)
         else:
             # single ticker case
             if "Close" in data.columns:
                 df = data.copy()
                 df["Ticker"] = batch[0]
-                frames.append(df.reset_index().rename(columns={"Date": "Date"}))
+                df = df.reset_index()
+                # Ensure Date column is datetime
+                if 'Date' in df.columns:
+                    df['Date'] = pd.to_datetime(df['Date'])
+                frames.append(df)
 
         time.sleep(pause)
 
@@ -95,13 +105,32 @@ def _macro_frame() -> pd.DataFrame:
     ^VIX (vol), ^TNX (US 10y yield), UUP (DXY proxy ETF), GLD (gold), USO (oil ETF)
     """
     macro_tk = ["^VIX", "^TNX", "UUP", "GLD", "USO"]
-    m = yf.download(macro_tk, period="2y", interval="1d", auto_adjust=False, progress=False, group_by='ticker')  # MultiIndex
+    m = None
+    for attempt in range(3):
+        try:
+            m = yf.download(macro_tk, period="2y", interval="1d", auto_adjust=False, progress=False, group_by='ticker', session=_yf_session)
+            if m is not None and not m.empty:
+                break
+        except Exception as e:
+            print(f"Macro download attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
+    
+    if m is None or m.empty:
+        print("Failed to download macro data, returning empty DataFrame")
+        return pd.DataFrame(columns=["Date"])
+    
     out = []
     for t in macro_tk:
         if t not in m.columns.levels[0]:
             continue
         df = m[t][["Close"]].reset_index().rename(columns={"Close": f"{t}_Close", "Date": "Date"})
+        # Ensure Date column is datetime
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'])
         out.append(df)
+    if not out:
+        return pd.DataFrame(columns=["Date"])
     macro = out[0]
     for df in out[1:]:
         macro = macro.merge(df, on="Date", how="outer")
@@ -146,7 +175,19 @@ def _vader_sentiment(tickers: List[str]) -> pd.DataFrame:
     for t in tickers:
         vals = []
         try:
-            news = (yf.Ticker(t, session=_yf_session).news) or []
+            ticker_obj = yf.Ticker(t, session=_yf_session)
+            # Add retry logic for news retrieval
+            news = []
+            for attempt in range(3):
+                try:
+                    news = ticker_obj.news or []
+                    if news:  # If we got news, break out of retry loop
+                        break
+                except Exception as e:
+                    if attempt == 2:  # Last attempt
+                        print(f"Failed to retrieve news for {t} after 3 attempts: {e}")
+                    time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+            
             for n in news:
                 title = (n.get("title") or "")[:280]
                 pub = n.get("providerPublishTime")
@@ -157,11 +198,12 @@ def _vader_sentiment(tickers: List[str]) -> pd.DataFrame:
                 if title:
                     s = sia.polarity_scores(title)["compound"]
                     vals.append(s)
-        except Exception:
+        except Exception as e:
+            print(f"Error processing news for {t}: {e}")
             pass
         mean = float(pd.Series(vals).mean()) if vals else 0.0
         scores.append({"Ticker": t, "sentiment_vader": mean})
-        time.sleep(0.02)
+        time.sleep(0.1)  # Increased delay to be more respectful to Yahoo
     return pd.DataFrame(scores)
 
 # ---------- Public API

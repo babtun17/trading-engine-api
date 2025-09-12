@@ -37,7 +37,7 @@ def make_panel_with_augments(panel: pd.DataFrame, use_finbert: bool = False) -> 
     df["ret_5d"] = df.groupby("ticker")["adj close"].pct_change(5)
 
     # Indicators
-    df["rsi14"] = df.groupby("ticker", group_keys=False).apply(lambda g: rsi(g["adj close"], 14))
+    df["rsi14"] = df.groupby("ticker", group_keys=False)["adj close"].apply(lambda g: rsi(g, 14))
     df["atr"] = df.groupby("ticker", group_keys=False).apply(lambda g: atr(g["high"], g["low"], g["adj close"], 14))
     df["atr_pct"] = df["atr"] / df["adj close"].replace(0, np.nan)
 
