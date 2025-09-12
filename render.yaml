@@ -32,7 +32,7 @@ services:
     env: python
     buildCommand: pip install -r requirements-jobs.txt
     startCommand: python -m app.pipeline intraday
-    schedule: "*/15 8-21 * * *"
+    schedule: "*/45 8-21 * * *"
     envVars:
       - key: SUPABASE_URL
         sync: false

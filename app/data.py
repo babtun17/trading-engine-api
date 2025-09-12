@@ -1,4 +1,4 @@
-import os, time
+import os, time, random
 from typing import List, Dict
 import pandas as pd
 import yfinance as yf
@@ -41,7 +41,7 @@ except Exception:
 
 # ---------- Helpers
 
-def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=4, pause=1.0) -> pd.DataFrame:
+def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=1, pause=6.0) -> pd.DataFrame:
     """
     Download in small chunks to avoid Yahoo throttling. Retries on empty batches.
     Returns tidy stacked OHLCV for all tickers that succeeded.
@@ -72,7 +72,7 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=4, pause=1.
             
             if data is None or data.empty:
                 print(f"Skipping batch {batch} - no data retrieved")
-                time.sleep(pause)
+                time.sleep(pause + random.uniform(0, 2))
                 continue
 
             if isinstance(data.columns, pd.MultiIndex):
@@ -98,7 +98,7 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=4, pause=1.
                         df['Date'] = pd.to_datetime(df['Date'])
                     frames.append(df)
 
-            time.sleep(pause)
+            time.sleep(pause + random.uniform(0, 2))
     
     # If batch download failed, try individual tickers
     if not frames:
@@ -122,7 +122,7 @@ def _dl_prices(tickers: List[str], period="2y", interval="1d", chunk=4, pause=1.
                     print(f"Failed to download {t}")
             except Exception as e:
                 print(f"Failed to download {t}: {e}")
-            time.sleep(pause)
+            time.sleep(pause + random.uniform(0, 2))
 
     if not frames:
         print("All download attempts failed - no market data available")
